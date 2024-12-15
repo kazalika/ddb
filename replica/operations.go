@@ -29,7 +29,7 @@ var operations = map[OperationType](func(Operation, DBProvider) (*string, error)
 		if err != nil {
 			return nil, errors.New("This key doesn't exist")
 		}
-		if val != o.Cond {
+		if *val != *o.Cond {
 			return val, nil
 		}
 		ok := db.Update(*o.Key, o.Value)

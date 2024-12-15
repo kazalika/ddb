@@ -160,11 +160,11 @@ func (raft *raftParticipantImpl) ApplyOperation(op Operation) (*string, error) {
 		raft.mu.Unlock()
 		return nil, nil
 	}
-	log.Println("Apply operation!")
+	log.Println(raft.me, "Apply operation!")
 
 	if raft.status != LEADER {
 		raft.mu.Unlock()
-		return nil, errors.New("I'm not leader :C")
+		return nil, errors.New(raft.me + "I'm not leader :C")
 	}
 
 	entry := logEntry{
@@ -173,11 +173,11 @@ func (raft *raftParticipantImpl) ApplyOperation(op Operation) (*string, error) {
 		Op:   op,
 	}
 	if op.T == GET {
-		entry.Op.WhoShouldExecute = raft.peers[raft.roundRobinIndex]
 		raft.roundRobinIndex = (raft.roundRobinIndex + 1) % len(raft.peers)
+		entry.Op.WhoShouldExecute = raft.peers[raft.roundRobinIndex]
 	}
 	raft.log = append(raft.log, entry)
-	log.Println("Append new operation to log ", len(raft.log))
+	log.Println(raft.me, "Append new operation to log ", len(raft.log))
 	exec := execution{
 		op:            op,
 		resultChannel: make(chan executionResult, 1),
@@ -203,7 +203,7 @@ func (raft *raftParticipantImpl) ApplyOperation(op Operation) (*string, error) {
 		}
 	}
 
-	log.Println("Got ", counter, " acks")
+	log.Println(raft.me, "got", counter, "acks")
 
 	raft.mu.Lock()
 
@@ -233,13 +233,13 @@ func (raft *raftParticipantImpl) applyCommittedEntries() {
 	}
 	defer raft.mu.Unlock()
 
-	log.Println("Apply committed entries")
+	log.Println(raft.me, "Apply committed entries")
 
 	for i := raft.appliedIndex; i < raft.commitIndex; i++ {
-		log.Println("Applying: ", i)
+		log.Println(raft.me, "Applying: ", i)
 		op := raft.log[i].Op
 		if op.T == GET && op.WhoShouldExecute != "" && op.WhoShouldExecute != raft.me {
-			log.Println("This GET not for me :C")
+			log.Println(raft.me, "This GET not for me :C")
 			str := strconv.Itoa(i) + " " + op.WhoShouldExecute
 			raft.executions[i].resultChannel <- executionResult{
 				res: &str,
@@ -301,7 +301,7 @@ func (raft *raftParticipantImpl) RequestVote(w http.ResponseWriter, req *http.Re
 		raft.term = voteReq.Term
 		raft.lastVote = voteReq.Candidate
 		raft.electionTimer = updateTimer(raft.electionTimer, raft.electionTimeout, raft.StartLeaderElection)
-		log.Println("Good candidate!")
+		log.Println(raft.me, "Good candidate =", voteReq.Candidate)
 		if sendVoteResponse(VoteResponse{
 			Term:       raft.term,
 			Guaranteed: true,
@@ -312,7 +312,7 @@ func (raft *raftParticipantImpl) RequestVote(w http.ResponseWriter, req *http.Re
 		return
 	}
 
-	log.Println("Bad candidate :C")
+	log.Println(raft.me, "Bad candidate :C =", voteReq.Candidate)
 	if sendVoteResponse(VoteResponse{
 		Term:       raft.term,
 		Guaranteed: false,
@@ -330,7 +330,7 @@ func (raft *raftParticipantImpl) AppendEntries(w http.ResponseWriter, req *http.
 	}
 	raft.mu.Unlock()
 
-	log.Println("Append entries!")
+	log.Println(raft.me, "Append entries!")
 
 	var body AppendEntriesRequest
 
@@ -401,8 +401,7 @@ func (raft *raftParticipantImpl) StartLeaderElection() {
 	raft.lastVote = raft.me
 	votes := 1
 
-	log.Println("New term =", raft.term)
-	log.Println(raft.peers)
+	log.Println(raft.me, "New term =", raft.term)
 	raft.mu.Unlock()
 
 	for _, peer := range raft.peers {
@@ -425,14 +424,14 @@ func (raft *raftParticipantImpl) StartLeaderElection() {
 		}
 		resp, err := http.Post(peer+"/vote", "application/json", bytes.NewReader(b))
 		if err != nil {
-			log.Println("Something is not ok: ", err)
+			log.Println(raft.me, "Something is not ok: ", err)
 			continue
 		}
 		d := json.NewDecoder(resp.Body)
 		var voteResp VoteResponse
 		err = d.Decode(&voteResp)
 		if err != nil {
-			log.Println("Something is not ok: ", err)
+			log.Println(raft.me, "Something is not ok: ", err)
 			continue
 		}
 
@@ -440,17 +439,17 @@ func (raft *raftParticipantImpl) StartLeaderElection() {
 		if voteResp.Guaranteed {
 			votes++
 		} else {
-			log.Println("Vote denied")
+			log.Println(raft.me, "Vote denied by", peer)
 			raft.term = max(raft.term, voteResp.Term+1)
 		}
 
-		log.Println("Votes: ", votes)
+		log.Println(raft.me, "Votes: ", votes)
 		if votes > len(raft.peers)/2 && raft.status == CANDIDATE {
 			raft.BecomeLeader()
 		}
 		raft.mu.Unlock()
 	}
-	log.Println("Got votes: ", votes)
+	log.Println(raft.me, "Got votes: ", votes)
 	if raft.status != LEADER {
 		raft.status = FOLLOWER
 		raft.lastVote = ""
@@ -459,7 +458,7 @@ func (raft *raftParticipantImpl) StartLeaderElection() {
 }
 
 func (raft *raftParticipantImpl) BecomeLeader() {
-	log.Println("I am a leader now!")
+	log.Println(raft.me, "I am a leader now!")
 
 	raft.status = LEADER
 	raft.leader = raft.me
@@ -493,24 +492,24 @@ func (raft *raftParticipantImpl) sendHeartbeats() {
 			return
 		}
 
-		log.Println("Gonna send hearbeats!")
+		log.Println(raft.me, "Gonna send hearbeats!")
 		for _, peer := range raft.peers {
 			if peer != raft.me {
 				resp, err := http.Post(peer+"/heartbeat", "", bytes.NewReader(b))
 				if err != nil {
-					log.Printf("Seems like %s is dead", peer)
+					log.Printf(raft.me, "Seems like %s is dead", peer)
 					continue
 				}
 				body, err := io.ReadAll(resp.Body)
 				if err != nil {
-					fmt.Printf("Peer %s is up date", peer)
+					fmt.Printf(raft.me, "Peer %s is up date", peer)
 					continue
 				}
 
 				var number int
 				_, err = fmt.Sscanf(string(body), "%d", &number)
 				if err != nil {
-					fmt.Println("Error parsing number:", err)
+					fmt.Println(raft.me, "Error parsing number:", err)
 					continue
 				}
 				raft.mu.Lock()
