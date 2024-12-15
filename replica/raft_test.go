@@ -7,6 +7,7 @@ import (
 	"net/http"
 	replica "replica"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +50,7 @@ func (c *TestCluster) Start() {
 	for _, node := range c.Nodes {
 		StartServer(node.Server)
 	}
+	time.Sleep(3 * time.Duration(len(c.Nodes)) * time.Second)
 }
 
 func (c *TestCluster) Stop() {
@@ -119,13 +121,12 @@ func TestLeaderElection(t *testing.T) {
 	cluster := NewTestCluster(3)
 	cluster.Start()
 
-	time.Sleep(10 * time.Second)
 	leader := cluster.GetLeader([]string{})
 	assert.NotEqual(t, leader, "")
 
 	StopNode(cluster.GetServerByName(leader))
-
 	time.Sleep(15 * time.Second)
+
 	newLeader := cluster.GetLeader([]string{leader})
 	assert.NotEqual(t, newLeader, "")
 	assert.NotEqual(t, newLeader, leader)
@@ -136,9 +137,8 @@ func TestLeaderElection(t *testing.T) {
 func TestLogReplication(t *testing.T) {
 	cluster := NewTestCluster(3)
 	cluster.Start()
-	time.Sleep(15 * time.Second)
 
-	leader := cluster.Nodes[0].Replica.ReplicationProvider.GetLeader()
+	leader := cluster.GetLeader([]string{})
 
 	key := replica.ResourceID("1")
 	value := "value"
@@ -163,7 +163,6 @@ func TestLogReplication(t *testing.T) {
 func TestLogSync(t *testing.T) {
 	cluster := NewTestCluster(5)
 	cluster.Start()
-	time.Sleep(20 * time.Second)
 
 	oldLeader := cluster.GetLeader([]string{})
 	assert.NotEqual(t, oldLeader, "")
@@ -201,5 +200,105 @@ func TestLogSync(t *testing.T) {
 	time.Sleep(10 * time.Second)
 
 	assert.Equal(t, 11, cluster.GetServerByName(oldLeader).Replica.ReplicationProvider.GetLogLength())
+	cluster.Stop()
+}
+
+func TestOperations(t *testing.T) {
+	cluster := NewTestCluster(3)
+	cluster.Start()
+	leader := cluster.GetLeader([]string{})
+
+	// CREATE
+	key := replica.ResourceID("key")
+	value := "value"
+	res, err := cluster.GetServerByName(leader).Replica.ReplicationProvider.ApplyOperation(replica.Operation{
+		T:     replica.POST,
+		Key:   &key,
+		Value: &value,
+	})
+
+	assert.NoError(t, err)
+	assert.NotNil(t, res)
+	assert.EqualValues(t, "OK", *res)
+
+	// GET
+	res, err = cluster.GetServerByName(leader).Replica.ReplicationProvider.ApplyOperation(replica.Operation{
+		T:   replica.GET,
+		Key: &key,
+	})
+
+	assert.NoError(t, err)
+	assert.NotNil(t, res)
+	resArray := strings.Split((*res), " ")
+	if len(resArray) == 2 {
+		actionNum, err := strconv.Atoi(resArray[0])
+		assert.NoError(t, err)
+		nodeID := resArray[1]
+
+		res, err = cluster.GetServerByName(nodeID).Replica.ReplicationProvider.GetExecutionResult(actionNum)
+		assert.NoError(t, err)
+		assert.NotNil(t, res)
+		assert.EqualValues(t, "value", *res)
+	} else {
+		assert.EqualValues(t, "value", *res)
+	}
+
+	// UPDATE
+	newValue := "new value"
+	res, err = cluster.GetServerByName(leader).Replica.ReplicationProvider.ApplyOperation(replica.Operation{
+		T:     replica.PUT,
+		Key:   &key,
+		Value: &newValue,
+	})
+
+	assert.NoError(t, err)
+	assert.NotNil(t, res)
+	assert.EqualValues(t, "OK", *res)
+	readRes, err := cluster.GetServerByName(leader).Replica.DB.Read(replica.ResourceID("key"))
+	assert.NoError(t, err)
+	assert.NotNil(t, readRes)
+	assert.EqualValues(t, "new value", *readRes)
+
+	// CAS
+	oldValue := newValue
+	newValue = "new value 2"
+	res, err = cluster.GetServerByName(leader).Replica.ReplicationProvider.ApplyOperation(replica.Operation{
+		T:     replica.PATCH,
+		Key:   &key,
+		Value: &newValue,
+		Cond:  &oldValue,
+	})
+
+	assert.NoError(t, err)
+	assert.NotNil(t, res)
+	assert.EqualValues(t, "new value", *res)
+	readRes, err = cluster.GetServerByName(leader).Replica.DB.Read(replica.ResourceID("key"))
+	assert.NoError(t, err)
+	assert.NotNil(t, readRes)
+	assert.EqualValues(t, "new value 2", *readRes)
+
+	// FAILED CAS
+	newValue3 := "new value 3"
+	res, err = cluster.GetServerByName(leader).Replica.ReplicationProvider.ApplyOperation(replica.Operation{
+		T:     replica.PATCH,
+		Key:   &key,
+		Value: &newValue3,
+		Cond:  &oldValue,
+	})
+	assert.NoError(t, err)
+	assert.EqualValues(t, "new value 2", *res)
+
+	// DELETE
+	res, err = cluster.GetServerByName(leader).Replica.ReplicationProvider.ApplyOperation(replica.Operation{
+		T:   replica.DELETE,
+		Key: &key,
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, res)
+	assert.EqualValues(t, "OK", *res)
+
+	readRes, err = cluster.GetServerByName(leader).Replica.DB.Read(replica.ResourceID("key"))
+	assert.Error(t, err)
+
 	cluster.Stop()
 }
